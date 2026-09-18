@@ -3611,17 +3611,18 @@ function AdminShell({ screen, go, onLogout, children }) {
 
 /* ─────────────────────────────  ADMIN DASHBOARD  ───────────────────────────── */
 
-function AdminDashboard({ go, cases }) {
-  const total = cases.length;
-  const positive = cases.filter((c) => c.result === "match").length;
-  const negative = cases.filter((c) => c.result === "none").length;
-  const inconclusive = cases.filter((c) => c.result === "inconclusive").length;
-  const activeOfficers = OFFICERS_SEED.filter((o) => o.status === "Active").length;
+function AdminDashboard({ go, cases, openCase }) {
+  const stats = DataService.getSystemStats();
+  const total = stats.total;
+  const positive = stats.positive;
+  const negative = stats.negative;
+  const inconclusive = stats.inconclusive;
+  const activeOfficers = stats.activeOfficers;
 
   const quick = [
-    { label: "Officer Management", sub: "View and manage registered officers", icon: Users, go: "adminofficers" },
+    { label: "Officer Management", sub: "View, filter and inspect officer profiles", icon: Users, go: "adminofficers" },
     { label: "Case Monitoring", sub: "Search, filter and open case records", icon: FolderClosed, go: "admincases" },
-    { label: "Security & Audit", sub: "Login activity and hash verification", icon: ShieldCheck, go: "adminsecurity" },
+    { label: "Security & Audit", sub: "Login activity, audit logs and hash verification", icon: ShieldCheck, go: "adminsecurity" },
     { label: "Reports", sub: "Case reports for review and export", icon: FileText, go: "adminreports" },
   ];
 
@@ -3660,7 +3661,7 @@ function AdminDashboard({ go, cases }) {
         <SectionTitle sub="Administrative sections">Quick access</SectionTitle>
         <div className="grid grid-cols-2 lg:grid-cols-4 gap-3">
           {quick.map((a) => (
-            <Card key={a.label} onClick={() => go(a.go)} className="p-4">
+            <Card key={a.label} onClick={() => go(a.go)} className="p-4 cursor-pointer hover:border-slate-300 transition-colors">
               <span className="inline-flex items-center justify-center rounded-md"
                 style={{ width: 36, height: 36, background: C.navy3, color: C.navy }}>
                 <a.icon size={18} />
@@ -3675,7 +3676,9 @@ function AdminDashboard({ go, cases }) {
       <Card>
         <CardHead title="Recent cases" note={`${cases.length} range-wide`} icon={FolderClosed}
           right={<Btn variant="ghost" size="sm" onClick={() => go("admincases")} iconRight={ChevronRight}>View All Cases</Btn>} />
-        {cases.slice(0, 5).map((c) => <CaseRow key={c.id} c={c} onClick={() => go("admincases")} />)}
+        {cases.slice(0, 5).map((c) => (
+          <CaseRow key={c.id} c={c} onClick={() => openCase ? openCase(c) : go("admincases")} />
+        ))}
       </Card>
 
       <Disclaimer />
@@ -3685,70 +3688,433 @@ function AdminDashboard({ go, cases }) {
 
 /* ─────────────────────────────  ADMIN OFFICER MANAGEMENT  ───────────────────────────── */
 
-function AdminOfficers() {
-  const [officers, setOfficers] = useState(OFFICERS_SEED);
+function AdminOfficers({ onSelectOfficer }) {
+  const [officers, setOfficers] = useState(() => DataService.getOfficers());
   const [showAdd, setShowAdd] = useState(false);
+  const [q, setQ] = useState("");
+  const [statusF, setStatusF] = useState("All");
+  const [sortBy, setSortBy] = useState("name");
+
+  // Form states
   const [name, setName] = useState("");
-  const [rank, setRank] = useState("Constable");
+  const [rank, setRank] = useState("Sub-Inspector");
+  const [unit, setUnit] = useState("Park Town Range, Chennai");
+  const [device, setDevice] = useState("SM-G998B-TN-41");
+
+  useEffect(() => {
+    const unsub = DataService.subscribe(() => {
+      setOfficers([...DataService.getOfficers()]);
+    });
+    return unsub;
+  }, []);
 
   const toggle = (id) => {
-    setOfficers((list) => list.map((o) => (o.id === id ? { ...o, status: o.status === "Active" ? "Inactive" : "Active" } : o)));
+    const target = DataService.getOfficerById(id);
+    if (!target) return;
+    const nextStatus = target.status === "Active" ? "Inactive" : "Active";
+    DataService.updateOfficer(id, { status: nextStatus });
+    DataService.addAuditLog({
+      actorId: ADMIN.id,
+      role: "Admin",
+      action: `Officer status changed to ${nextStatus}`,
+      caseId: null,
+      officerId: id,
+      status: "Success",
+      details: `${target.name} (${target.id}) set to ${nextStatus}`,
+    });
   };
 
   const addOfficer = () => {
     if (!name.trim()) return;
-    const num = 1000 + officers.length;
-    setOfficers((list) => [{ name: name.trim(), id: `TN-NCB-${num}`, rank, status: "Active", last: "Just now" }, ...list]);
-    setName(""); setRank("Constable"); setShowAdd(false);
+    const num = 2300 + officers.length;
+    const newId = `TN-NCB-${num}`;
+    DataService.addOfficer({
+      id: newId,
+      name: name.trim(),
+      rank,
+      unit: unit.trim() || ADMIN.unit,
+      device: device.trim() || `SM-G998B-TN-${officers.length + 1}`,
+      status: "Active",
+      lastLogin: "Never",
+      lastActivity: "Roster enrolled",
+    });
+    DataService.addAuditLog({
+      actorId: ADMIN.id,
+      role: "Admin",
+      action: "New officer enrolled",
+      caseId: null,
+      officerId: newId,
+      status: "Success",
+      details: `Enrolled ${name.trim()} (${newId}) into ${unit}`,
+    });
+    setName("");
+    setRank("Sub-Inspector");
+    setShowAdd(false);
   };
+
+  const filteredOfficers = officers.filter((o) => {
+    const term = q.toLowerCase().trim();
+    const matchesSearch = !term || `${o.name} ${o.id} ${o.rank} ${o.unit} ${o.device}`.toLowerCase().includes(term);
+    const matchesStatus = statusF === "All" || o.status === statusF;
+    return matchesSearch && matchesStatus;
+  }).sort((a, b) => {
+    if (sortBy === "cases") {
+      return DataService.getOfficerCases(b.id).length - DataService.getOfficerCases(a.id).length;
+    }
+    if (sortBy === "recent") {
+      return (b.lastActivity || "").localeCompare(a.lastActivity || "");
+    }
+    return a.name.localeCompare(b.name);
+  });
 
   return (
     <div className="space-y-5">
       <SectionTitle sub={`${officers.length} registered officers · ${ADMIN.unit}`}
-        right={<Btn icon={UserPlus} onClick={() => setShowAdd((s) => !s)}>Add Officer</Btn>}>
+        right={<Btn icon={UserPlus} onClick={() => setShowAdd((s) => !s)}>{showAdd ? "Close Form" : "Add Officer"}</Btn>}>
         Officer Management
       </SectionTitle>
 
       {showAdd && (
         <Card className="p-4">
-          <div className="grid sm:grid-cols-3 gap-3 items-end">
+          <div className="text-sm font-semibold mb-3 text-slate-800">Enroll New Field Officer</div>
+          <div className="grid sm:grid-cols-2 lg:grid-cols-4 gap-3 items-end">
             <Input label="Officer Name" value={name} onChange={setName} icon={User} placeholder="Full name" />
             <div>
               <div style={{ color: C.ink2, fontSize: 12, fontWeight: 600, marginBottom: 6 }}>Rank</div>
               <select value={rank} onChange={(e) => setRank(e.target.value)} className="rounded-md px-3 outline-none w-full"
                 style={{ height: 42, fontSize: 13.5, border: `1px solid ${C.border}`, color: C.ink }}>
-                {["Constable", "Sub-Inspector", "Inspector"].map((r) => <option key={r}>{r}</option>)}
+                {["Constable", "Head Constable", "Sub-Inspector", "Inspector", "Superintendent"].map((r) => <option key={r}>{r}</option>)}
               </select>
             </div>
-            <Btn icon={Check} onClick={addOfficer}>Add to Roster</Btn>
+            <Input label="Assigned Unit" value={unit} onChange={setUnit} icon={MapPin} placeholder="Police range/station" />
+            <Input label="Assigned Device ID" value={device} onChange={setDevice} icon={KeyRound} placeholder="Device model/ID" />
           </div>
-          <div style={{ color: C.faint, fontSize: 11, marginTop: 8 }}>Prototype only — added officers are not persisted.</div>
+          <div className="flex items-center justify-between gap-3 mt-4 pt-3 border-t border-slate-100">
+            <span style={{ color: C.faint, fontSize: 11 }}>Securely adds officer to live local storage roster.</span>
+            <Btn icon={Check} onClick={addOfficer}>Confirm & Enroll</Btn>
+          </div>
         </Card>
       )}
 
-      <Card>
-        <CardHead title="Registered Officers" icon={Users} note={`${officers.filter((o) => o.status === "Active").length} active`} />
-        {officers.map((o, i) => (
-          <div key={o.id} className="flex items-center gap-3 px-4 py-3.5 flex-wrap"
-            style={{ borderBottom: i < officers.length - 1 ? `1px solid ${C.border2}` : "none" }}>
-            <span className="inline-flex items-center justify-center rounded-full shrink-0"
-              style={{ width: 34, height: 34, background: C.navy3, color: C.navy, fontSize: 12, fontWeight: 700 }}>
-              {o.name.split(" ").filter(Boolean).slice(-2).map((w) => w[0]).join("").toUpperCase()}
-            </span>
-            <div className="min-w-0" style={{ flex: "1 1 200px" }}>
-              <div style={{ color: C.ink, fontSize: 13.5, fontWeight: 650 }}>{o.name}</div>
-              <div style={{ color: C.muted, fontSize: 11.5, fontFamily: MONO, marginTop: 1 }}>{o.id} · {o.rank}</div>
-            </div>
-            <div style={{ color: C.faint, fontSize: 11.5 }} className="hidden sm:block">Last activity: {o.last}</div>
-            <Pill fg={o.status === "Active" ? C.green : C.muted} bg={o.status === "Active" ? C.greenSoft : "#EEF1F5"} dot>{o.status}</Pill>
-            <button onClick={() => toggle(o.id)} className="flex items-center gap-1.5 rounded-md px-2.5"
-              style={{ height: 30, fontSize: 11.5, fontWeight: 600, color: o.status === "Active" ? C.red : C.green, border: `1px solid ${o.status === "Active" ? C.redSoft : "#C7E5C4"}` }}>
-              {o.status === "Active" ? <ToggleRight size={14} /> : <ToggleLeft size={14} />}
-              {o.status === "Active" ? "Deactivate" : "Activate"}
-            </button>
-          </div>
-        ))}
+      {/* Filter and search toolbar */}
+      <Card className="p-3.5 flex flex-wrap items-center justify-between gap-3">
+        <div className="flex-1 min-w-[240px]">
+          <Input value={q} onChange={setQ} icon={Search} placeholder="Search by name, Officer ID, rank or device..." />
+        </div>
+        <div className="flex items-center gap-2 flex-wrap">
+          <span className="flex items-center gap-1.5 text-xs text-slate-500"><Filter size={13} /> Filter:</span>
+          <select value={statusF} onChange={(e) => setStatusF(e.target.value)} className="rounded-md px-2.5 outline-none"
+            style={{ height: 34, fontSize: 12.5, border: `1px solid ${C.border}`, color: C.ink2, background: C.navy3 }}>
+            <option value="All">All Statuses</option>
+            <option value="Active">Active Only</option>
+            <option value="Inactive">Inactive Only</option>
+          </select>
+          <select value={sortBy} onChange={(e) => setSortBy(e.target.value)} className="rounded-md px-2.5 outline-none"
+            style={{ height: 34, fontSize: 12.5, border: `1px solid ${C.border}`, color: C.ink2, background: C.navy3 }}>
+            <option value="name">Sort by Name (A-Z)</option>
+            <option value="cases">Sort by Cases Recorded</option>
+            <option value="recent">Sort by Recent Activity</option>
+          </select>
+        </div>
       </Card>
+
+      <Card>
+        <CardHead title="Registered Officers" icon={Users} note={`${officers.filter((o) => o.status === "Active").length} active · ${officers.length} total`} />
+        {filteredOfficers.length === 0 ? (
+          <EmptyState title="No Officers Found" body="No registered officer matches your search or filter criteria." />
+        ) : (
+          filteredOfficers.map((o, i) => {
+            const caseCount = DataService.getOfficerCases(o.id).length;
+            const initials = o.name.split(" ").filter(Boolean).slice(-2).map((w) => w[0]).join("").toUpperCase();
+            return (
+              <div key={o.id} className="flex items-center gap-3 px-4 py-3.5 flex-wrap hover:bg-slate-50 transition-colors"
+                style={{ borderBottom: i < filteredOfficers.length - 1 ? `1px solid ${C.border2}` : "none" }}>
+                <span className="inline-flex items-center justify-center rounded-full shrink-0"
+                  style={{ width: 38, height: 38, background: C.navy3, color: C.navy, fontSize: 12.5, fontWeight: 700 }}>
+                  {initials}
+                </span>
+                <div className="min-w-0" style={{ flex: "1 1 200px" }}>
+                  <div className="flex items-center gap-2">
+                    <span style={{ color: C.ink, fontSize: 13.5, fontWeight: 650 }}>{o.name}</span>
+                    <Pill fg={o.status === "Active" ? C.green : C.muted} bg={o.status === "Active" ? C.greenSoft : "#EEF1F5"} dot>{o.status}</Pill>
+                  </div>
+                  <div style={{ color: C.muted, fontSize: 11.5, fontFamily: MONO, marginTop: 1 }}>
+                    {o.id} · {o.rank} · {o.unit}
+                  </div>
+                </div>
+
+                <div className="flex items-center gap-3 flex-wrap">
+                  <span className="inline-flex items-center gap-1 text-xs font-semibold px-2 py-1 rounded bg-slate-100 text-slate-700">
+                    <FolderClosed size={12} style={{ color: C.navy }} /> {caseCount} {caseCount === 1 ? "case" : "cases"}
+                  </span>
+                  <div style={{ color: C.faint, fontSize: 11.5 }} className="hidden sm:block">
+                    Last: {o.lastActivity || o.lastLogin}
+                  </div>
+                </div>
+
+                <div className="flex items-center gap-2 ml-auto">
+                  <Btn variant="outline" size="sm" icon={Eye} onClick={() => onSelectOfficer && onSelectOfficer(o)}>
+                    View Profile
+                  </Btn>
+                  <button onClick={() => toggle(o.id)} className="flex items-center gap-1.5 rounded-md px-2.5"
+                    style={{ height: 34, fontSize: 11.5, fontWeight: 600, color: o.status === "Active" ? C.red : C.green, border: `1px solid ${o.status === "Active" ? C.redSoft : "#C7E5C4"}` }}>
+                    {o.status === "Active" ? <ToggleRight size={14} /> : <ToggleLeft size={14} />}
+                    {o.status === "Active" ? "Deactivate" : "Activate"}
+                  </button>
+                </div>
+              </div>
+            );
+          })
+        )}
+      </Card>
+    </div>
+  );
+}
+
+/* ─────────────────────────────  ADMIN OFFICER DETAIL (PROFILE INSPECTION)  ───────────────────────────── */
+
+function AdminOfficerDetail({ officer, back, openCase }) {
+  const [tab, setTab] = useState("cases");
+  const [officerData, setOfficerData] = useState(() => officer ? (DataService.getOfficerById(officer.id) || officer) : null);
+
+  useEffect(() => {
+    if (!officer) return;
+    const unsub = DataService.subscribe(() => {
+      const fresh = DataService.getOfficerById(officer.id);
+      if (fresh) setOfficerData({ ...fresh });
+    });
+    return unsub;
+  }, [officer]);
+
+  if (!officerData) {
+    return (
+      <div className="p-6 text-center space-y-3">
+        <div className="text-slate-700">No officer selected.</div>
+        <Btn icon={ChevronLeft} onClick={back}>Back to Officers</Btn>
+      </div>
+    );
+  }
+
+  const o = officerData;
+  const stats = DataService.getOfficerStats(o.id);
+  const officerCases = DataService.getOfficerCases(o.id);
+  const officerActivities = DataService.getActivities(o.id);
+  const officerAudit = DataService.getAuditLogs(o.id);
+
+  const initials = o.name.split(" ").filter(Boolean).slice(-2).map((w) => w[0]).join("").toUpperCase();
+
+  const toggleStatus = () => {
+    const nextStatus = o.status === "Active" ? "Inactive" : "Active";
+    DataService.updateOfficer(o.id, { status: nextStatus });
+    DataService.addAuditLog({
+      actorId: ADMIN.id,
+      role: "Admin",
+      action: `Officer ${nextStatus === "Active" ? "activated" : "deactivated"}`,
+      caseId: null,
+      officerId: o.id,
+      status: "Success",
+      details: `Admin changed status of ${o.id} (${o.name}) to ${nextStatus}`,
+    });
+  };
+
+  return (
+    <div className="space-y-6">
+      {/* Header and Back navigation */}
+      <div className="flex items-center justify-between gap-3 flex-wrap">
+        <button onClick={back} className="flex items-center gap-1.5" style={{ color: C.navy, fontSize: 13, fontWeight: 650 }}>
+          <ChevronLeft size={16} /> Back to Officer Management
+        </button>
+        <div className="flex items-center gap-2">
+          <Pill fg={o.status === "Active" ? C.green : C.muted} bg={o.status === "Active" ? C.greenSoft : "#EEF1F5"} dot>
+            {o.status} Officer
+          </Pill>
+          <Btn variant="outline" size="sm" onClick={toggleStatus} icon={o.status === "Active" ? ToggleRight : ToggleLeft}>
+            {o.status === "Active" ? "Deactivate Officer" : "Activate Officer"}
+          </Btn>
+        </div>
+      </div>
+
+      {/* Officer Banner Profile Card */}
+      <Card className="p-5 lg:p-6" style={{ background: "#FFFFFF", border: `1px solid ${C.border}` }}>
+        <div className="flex flex-col sm:flex-row sm:items-center gap-4">
+          <span className="inline-flex items-center justify-center rounded-full shrink-0"
+            style={{ width: 62, height: 62, background: C.navy, color: C.saffron, fontSize: 20, fontWeight: 700 }}>
+            {initials}
+          </span>
+          <div className="flex-1 min-w-0">
+            <div className="flex items-center gap-2.5 flex-wrap">
+              <h1 style={{ color: C.ink, fontSize: 22, fontWeight: 700, letterSpacing: "-0.02em" }}>{o.name}</h1>
+              <span className="px-2.5 py-0.5 rounded text-xs font-mono font-semibold" style={{ background: C.navy3, color: C.navy }}>
+                {o.id}
+              </span>
+              <Pill fg={C.navy} bg={C.cyanSoft} icon={ShieldCheck}>{o.rank}</Pill>
+            </div>
+            <div className="flex flex-wrap items-center gap-x-4 gap-y-1 mt-2 text-xs text-slate-500">
+              <span className="flex items-center gap-1"><MapPin size={12} style={{ color: C.saffron }} /> {o.unit}</span>
+              <span className="flex items-center gap-1"><Cpu size={12} /> Device: <span className="font-mono text-slate-700">{o.device}</span></span>
+              <span>Last Login: <strong className="text-slate-700">{o.lastLogin}</strong></span>
+              <span>Last Activity: <strong className="text-slate-700">{o.lastActivity}</strong></span>
+            </div>
+          </div>
+        </div>
+      </Card>
+
+      {/* 6 Key Metrics summary */}
+      <div>
+        <SectionTitle sub="Evidence screening and case performance summary">Officer Case Breakdown</SectionTitle>
+        <div className="grid grid-cols-2 lg:grid-cols-6 gap-3">
+          <StatTile label="Total Cases" value={stats.total} tone={C.navy} />
+          <StatTile label="Hash Verified" value={stats.verified} tone={C.green} />
+          <StatTile label="Pending Verification" value={stats.pending} tone={C.amber} />
+          <StatTile label="Positive (Match)" value={stats.positive} tone={C.green} />
+          <StatTile label="Negative (None)" value={stats.negative} tone={C.muted} />
+          <StatTile label="Inconclusive" value={stats.inconclusive} tone={C.saffron} />
+        </div>
+      </div>
+
+      {/* Tabs navigation */}
+      <div className="flex border-b border-slate-200 overflow-x-auto">
+        {[
+          { id: "cases", label: `Cases Recorded (${officerCases.length})`, icon: FolderClosed },
+          { id: "activity", label: `Activity Timeline (${officerActivities.length})`, icon: Clock },
+          { id: "audit", label: `Audit Trail (${officerAudit.length})`, icon: ShieldCheck },
+          { id: "device", label: "Device & Security", icon: Cpu },
+        ].map((t) => {
+          const on = tab === t.id;
+          return (
+            <button key={t.id} onClick={() => setTab(t.id)}
+              className="flex items-center gap-2 px-4 py-3 text-sm font-semibold border-b-2 transition-colors whitespace-nowrap"
+              style={{
+                borderColor: on ? C.navy : "transparent",
+                color: on ? C.navy : C.muted,
+                background: on ? "rgba(23,63,122,.04)" : "transparent",
+              }}>
+              <t.icon size={16} />
+              {t.label}
+            </button>
+          );
+        })}
+      </div>
+
+      {/* Tab 1: Cases Recorded */}
+      {tab === "cases" && (
+        <Card>
+          <CardHead title={`Cases Recorded by ${o.name}`} icon={FolderClosed} note={`${officerCases.length} records`} />
+          {officerCases.length === 0 ? (
+            <EmptyState title="No Cases Recorded Yet" body={`Officer ${o.name} has not recorded any presumptive drug test cases yet.`} />
+          ) : (
+            officerCases.map((c) => (
+              <AdminCaseRow key={c.id} c={c} onClick={() => openCase(c)} />
+            ))
+          )}
+        </Card>
+      )}
+
+      {/* Tab 2: Activity Timeline */}
+      {tab === "activity" && (
+        <Card>
+          <CardHead title="Officer Activity Log" icon={Clock} note={`${officerActivities.length} events logged`} />
+          {officerActivities.length === 0 ? (
+            <EmptyState title="No Activity Events" body="No operational events recorded for this officer." />
+          ) : (
+            <div className="divide-y divide-slate-100">
+              {officerActivities.map((a, idx) => (
+                <div key={a.id || idx} className="p-4 flex items-start gap-3 hover:bg-slate-50">
+                  <span className="inline-flex items-center justify-center rounded-full mt-0.5 shrink-0"
+                    style={{ width: 28, height: 28, background: C.navy3, color: C.navy }}>
+                    <Activity size={14} />
+                  </span>
+                  <div className="flex-1 min-w-0">
+                    <div className="flex items-center justify-between gap-2 flex-wrap">
+                      <span style={{ color: C.ink, fontSize: 13.5, fontWeight: 650 }}>{a.action}</span>
+                      <span style={{ color: C.faint, fontSize: 11, fontFamily: MONO }}>{a.timestamp}</span>
+                    </div>
+                    {a.caseId && (
+                      <div className="mt-1">
+                        <span className="inline-flex items-center gap-1 font-mono text-xs px-2 py-0.5 rounded bg-blue-50 text-blue-700">
+                          <FolderClosed size={11} /> {a.caseId}
+                        </span>
+                      </div>
+                    )}
+                    <div style={{ color: C.muted, fontSize: 12, marginTop: 4 }}>
+                      {a.details || a.detail || "Operational step completed"}
+                    </div>
+                  </div>
+                </div>
+              ))}
+            </div>
+          )}
+        </Card>
+      )}
+
+      {/* Tab 3: Audit Trail */}
+      {tab === "audit" && (
+        <Card>
+          <CardHead title="Security & Compliance Audit Trail" icon={ShieldCheck} note={`${officerAudit.length} audit entries`} />
+          {officerAudit.length === 0 ? (
+            <EmptyState title="No Audit Records" body="No audit log entries associated with this officer ID." />
+          ) : (
+            <div className="divide-y divide-slate-100">
+              {officerAudit.map((a, idx) => (
+                <div key={a.id || idx} className="p-4 flex items-start gap-3 hover:bg-slate-50">
+                  <span className="inline-flex items-center justify-center rounded-full mt-0.5 shrink-0"
+                    style={{ width: 28, height: 28, background: C.greenSoft, color: C.green }}>
+                    <ShieldCheck size={14} />
+                  </span>
+                  <div className="flex-1 min-w-0">
+                    <div className="flex items-center justify-between gap-2 flex-wrap">
+                      <div className="flex items-center gap-2">
+                        <span style={{ color: C.ink, fontSize: 13.5, fontWeight: 650 }}>{a.action}</span>
+                        <Pill fg={a.status === "Success" ? C.green : C.amber} bg={a.status === "Success" ? C.greenSoft : C.amberSoft}>
+                          {a.status || "Logged"}
+                        </Pill>
+                      </div>
+                      <span style={{ color: C.faint, fontSize: 11, fontFamily: MONO }}>{a.timestamp}</span>
+                    </div>
+                    <div className="flex items-center gap-2 mt-1 text-xs text-slate-500 font-mono">
+                      <span>Actor: {a.actorId || o.id}</span>
+                      <span>·</span>
+                      <span>Role: {a.role || "Officer"}</span>
+                      {a.caseId && <span>· Case: {a.caseId}</span>}
+                    </div>
+                    <div style={{ color: C.muted, fontSize: 12, marginTop: 4 }}>
+                      {a.details || "Cryptographic integrity log recorded."}
+                    </div>
+                  </div>
+                </div>
+              ))}
+            </div>
+          )}
+        </Card>
+      )}
+
+      {/* Tab 4: Device & Security */}
+      {tab === "device" && (
+        <div className="grid lg:grid-cols-2 gap-5">
+          <Card className="p-4 space-y-3">
+            <CardHead title="Device Authentication" icon={Cpu} />
+            <div className="grid grid-cols-2 gap-3 pt-2">
+              <Field label="Device Model / ID" value={o.device} mono />
+              <Field label="Hardware Serial" value={`SN-${o.device.replace(/[^A-Z0-9]/gi, "")}-77A`} mono />
+              <Field label="Mobile Client Version" value="NarcoLocker Secure Field v1.0.4" />
+              <Field label="Enrollment Status" value="Certified Device · Active" />
+              <Field label="Storage Security" value="Encrypted (AES-256 GCM)" />
+              <Field label="Local Sync Status" value="Device Storage Synchronized" />
+            </div>
+          </Card>
+
+          <Card className="p-4 space-y-3">
+            <CardHead title="Cryptographic Keys & Permissions" icon={Fingerprint} />
+            <div className="grid grid-cols-2 gap-3 pt-2">
+              <Field label="Officer Key Pair" value={`ED25519-${o.id}-LIVE`} mono />
+              <Field label="Signature Status" value="Valid & Hardware-Bound" />
+              <Field label="GPS Sensor Calibration" value="GNSS Calibrated (±4.2m)" />
+              <Field label="Tamper Protection" value="Hardware Enclave Active" />
+              <Field label="Authorized Roles" value="Screening, Digital Seal, QR" wide />
+            </div>
+          </Card>
+        </div>
+      )}
     </div>
   );
 }
@@ -3756,9 +4122,9 @@ function AdminOfficers() {
 /* ─────────────────────────────  ADMIN CASE MONITORING  ───────────────────────────── */
 
 function AdminCaseRow({ c, onClick }) {
-  const m = RESULT_META[c.result];
+  const m = RESULT_META[c.result] || RESULT_META.match;
   return (
-    <div onClick={onClick} className="flex items-center gap-3 px-4 py-3 cursor-pointer flex-wrap"
+    <div onClick={onClick} className="flex items-center gap-3 px-4 py-3 cursor-pointer flex-wrap hover:bg-slate-50 transition-colors"
       style={{ borderBottom: `1px solid ${C.border2}` }}>
       <span className="inline-flex items-center justify-center rounded-md shrink-0"
         style={{ width: 34, height: 34, background: m.bg, color: m.fg }}>
@@ -3767,9 +4133,16 @@ function AdminCaseRow({ c, onClick }) {
       <div className="min-w-0" style={{ flex: "1 1 220px" }}>
         <div className="flex items-center gap-2 flex-wrap">
           <span style={{ color: C.ink, fontSize: 13, fontWeight: 650, fontFamily: MONO }}>{c.id}</span>
-          <span style={{ color: C.faint, fontSize: 11.5, fontFamily: MONO }}>{c.officerId}</span>
+          <span className="px-2 py-0.5 rounded text-xs font-mono font-medium bg-slate-100 text-slate-700">
+            {c.officerId}
+          </span>
+          {c.officerName && (
+            <span style={{ color: C.ink2, fontSize: 11.5, fontWeight: 600 }}>{c.officerName}</span>
+          )}
         </div>
-        <div style={{ color: C.muted, fontSize: 11.5, marginTop: 2 }}>{c.date} · {c.time}</div>
+        <div style={{ color: C.muted, fontSize: 11.5, marginTop: 2 }}>
+          {c.date} · {c.time} &nbsp;|&nbsp; {c.area} {c.ref ? ` · ${c.ref}` : ""}
+        </div>
       </div>
       <Pill fg={m.fg} bg={m.bg}>{m.label}</Pill>
       <Pill fg={C.green} bg={C.greenSoft} icon={MapPin}>GPS Logged</Pill>
@@ -3786,19 +4159,24 @@ function AdminCaseMonitoring({ cases, openCase }) {
   const [resultF, setResultF] = useState("All");
   const [dateF, setDateF] = useState("All");
   const [officerF, setOfficerF] = useState("All");
+  const [verifyF, setVerifyF] = useState("All");
 
+  const officersList = DataService.getOfficers();
   const dates = ["All", ...Array.from(new Set(cases.map((c) => c.date)))];
-  const withOfficer = cases.map((c, i) => ({ ...c, officerId: CASE_OFFICER_IDS[i % CASE_OFFICER_IDS.length] }));
 
-  const list = withOfficer.filter((c) => {
-    const hit = `${c.id} ${c.area}`.toLowerCase().includes(q.toLowerCase());
+  const list = cases.filter((c) => {
+    const hit = `${c.id} ${c.area} ${c.substance} ${c.officerId || ""} ${c.officerName || ""} ${c.ref || ""}`.toLowerCase().includes(q.toLowerCase());
     const passResult =
       resultF === "All" ? true :
       resultF === "Positive" ? c.result === "match" :
       resultF === "Negative" ? c.result === "none" : c.result === "inconclusive";
     const passDate = dateF === "All" || c.date === dateF;
-    const passOfficer = officerF === "All" || c.officerId === officerF;
-    return hit && passResult && passDate && passOfficer;
+    const passOfficer = officerF === "All" || (c.officerId || "") === officerF;
+    const passVerify =
+      verifyF === "All" ? true :
+      verifyF === "Verified" ? c.verified === true :
+      c.verified === false;
+    return hit && passResult && passDate && passOfficer && passVerify;
   });
 
   return (
@@ -3806,21 +4184,27 @@ function AdminCaseMonitoring({ cases, openCase }) {
       <SectionTitle sub={`${cases.length} range-wide records · ${ADMIN.unit}`}>Case Monitoring</SectionTitle>
 
       <Card className="p-4 space-y-3">
-        <Input value={q} onChange={setQ} icon={Search} placeholder="Search Case ID or location…" />
+        <Input value={q} onChange={setQ} icon={Search} placeholder="Search Case ID, officer ID, name, location or substance…" />
         <div className="flex flex-wrap items-center gap-2">
-          <span className="flex items-center gap-1.5" style={{ color: C.faint, fontSize: 11.5 }}><Filter size={12} /> Filters</span>
+          <span className="flex items-center gap-1.5" style={{ color: C.faint, fontSize: 11.5 }}><Filter size={12} /> Filters:</span>
           <select value={resultF} onChange={(e) => setResultF(e.target.value)} className="rounded-md px-2 outline-none"
-            style={{ height: 30, fontSize: 12, border: `1px solid ${C.border}`, color: C.ink2, background: C.navy3 }}>
-            {["All", "Positive", "Negative", "Inconclusive"].map((r) => <option key={r}>{r}</option>)}
+            style={{ height: 32, fontSize: 12, border: `1px solid ${C.border}`, color: C.ink2, background: C.navy3 }}>
+            {["All", "Positive", "Negative", "Inconclusive"].map((r) => <option key={r} value={r}>{r === "All" ? "All Results" : r}</option>)}
           </select>
           <select value={dateF} onChange={(e) => setDateF(e.target.value)} className="rounded-md px-2 outline-none"
-            style={{ height: 30, fontSize: 12, border: `1px solid ${C.border}`, color: C.ink2, background: C.navy3 }}>
-            {dates.map((d) => <option key={d}>{d}</option>)}
+            style={{ height: 32, fontSize: 12, border: `1px solid ${C.border}`, color: C.ink2, background: C.navy3 }}>
+            {dates.map((d) => <option key={d} value={d}>{d === "All" ? "All Dates" : d}</option>)}
           </select>
           <select value={officerF} onChange={(e) => setOfficerF(e.target.value)} className="rounded-md px-2 outline-none"
-            style={{ height: 30, fontSize: 12, border: `1px solid ${C.border}`, color: C.ink2, background: C.navy3 }}>
-            <option>All</option>
-            {CASE_OFFICER_IDS.map((id) => <option key={id}>{id}</option>)}
+            style={{ height: 32, fontSize: 12, border: `1px solid ${C.border}`, color: C.ink2, background: C.navy3 }}>
+            <option value="All">All Officers</option>
+            {officersList.map((o) => <option key={o.id} value={o.id}>{o.id} · {o.name}</option>)}
+          </select>
+          <select value={verifyF} onChange={(e) => setVerifyF(e.target.value)} className="rounded-md px-2 outline-none"
+            style={{ height: 32, fontSize: 12, border: `1px solid ${C.border}`, color: C.ink2, background: C.navy3 }}>
+            <option value="All">All Verification</option>
+            <option value="Verified">Verified Only</option>
+            <option value="Pending">Pending Only</option>
           </select>
         </div>
       </Card>
@@ -3828,7 +4212,7 @@ function AdminCaseMonitoring({ cases, openCase }) {
       <Card>
         <CardHead title="Case Records" note={`${list.length} matching`} icon={FolderClosed} />
         {list.length === 0 ? (
-          <EmptyState title="No Matching Cases" body="Try a different case ID, result, date or officer filter." />
+          <EmptyState title="No Matching Cases" body="Try a different case ID, result, date, verification status or officer filter." />
         ) : list.map((c) => <AdminCaseRow key={c.id} c={c} onClick={() => openCase(c)} />)}
       </Card>
     </div>
@@ -3837,24 +4221,38 @@ function AdminCaseMonitoring({ cases, openCase }) {
 
 function AdminCaseDetail({ c, back }) {
   const [verifying, setVerifying] = useState(false);
-  const [verified, setVerified] = useState(true);
-  const m = RESULT_META[c.result];
+  const [verified, setVerified] = useState(c?.verified !== false);
+  const m = RESULT_META[c?.result] || RESULT_META.match;
 
   const reverify = () => {
     setVerifying(true);
-    setTimeout(() => { setVerifying(false); setVerified(true); }, 900);
+    setTimeout(() => {
+      setVerifying(false);
+      setVerified(true);
+      DataService.addAuditLog({
+        actorId: ADMIN.id,
+        role: "Admin",
+        action: "Case hash re-verified",
+        caseId: c.id,
+        officerId: c.officerId,
+        status: "Success",
+        details: `Integrity verified for case ${c.id} by Administrator ${ADMIN.name}`,
+      });
+    }, 850);
   };
+
+  const assignedOfficer = DataService.getOfficerById(c?.officerId);
 
   return (
     <div className="space-y-5">
       <div>
         <button onClick={back} className="flex items-center gap-1.5 mb-2" style={{ color: C.navy, fontSize: 12.5, fontWeight: 600 }}>
-          <ChevronLeft size={14} /> Case Monitoring
+          <ChevronLeft size={14} /> Back to Case Monitoring
         </button>
         <div className="flex items-center gap-2.5 flex-wrap">
           <h1 style={{ color: C.ink, fontSize: 20, fontWeight: 700, fontFamily: MONO }}>{c.id}</h1>
           <Pill fg={m.fg} bg={m.bg} icon={m.Icon}>{m.label}</Pill>
-          {c.verified
+          {verified
             ? <Pill fg={C.green} bg={C.greenSoft} icon={ShieldCheck}>Case Verified</Pill>
             : <Pill fg={C.amber} bg={C.amberSoft} icon={Clock}>Pending Verification</Pill>}
         </div>
@@ -3864,13 +4262,17 @@ function AdminCaseDetail({ c, back }) {
         <CardHead title="Case Details" icon={FolderClosed} />
         <div className="p-4 grid grid-cols-2 sm:grid-cols-4 gap-4">
           <Field label="Case ID" value={c.id} mono />
+          <Field label="Officer ID" value={c.officerId || "TN-NCB-2291"} mono />
+          <Field label="Officer Name" value={c.officerName || assignedOfficer?.name || "Officer"} />
+          <Field label="FIR Reference" value={c.ref || "FIR 412/2026"} />
           <Field label="Date" value={c.date} />
           <Field label="Time" value={c.time} />
           <Field label="Location" value={c.area} />
           <Field label="Unit" value={c.loc} />
           <Field label="Substance" value={c.substance} />
-          <Field label="ΔE00" value={c.dE.toFixed(1)} mono />
-          <Field label="Sync" value={c.synced ? "Synced" : "Pending Sync"} />
+          <Field label="Test Pouch" value={c.pouch || "Marquis reagent pouch"} />
+          <Field label="ΔE00" value={typeof c.dE === "number" ? c.dE.toFixed(1) : c.dE} mono />
+          <Field label="Sync Status" value={c.synced ? "Synced" : "Pending Sync"} />
         </div>
       </Card>
 
@@ -3885,11 +4287,11 @@ function AdminCaseDetail({ c, back }) {
           <div className="rounded-md p-3.5" style={{ background: "#F3F7FC", border: `1px solid ${C.border2}` }}>
             <div style={{ color: C.faint, fontSize: 11, fontWeight: 650 }}>Image Hash (SHA-256)</div>
             <div style={{ color: C.ink, fontSize: 11.5, fontFamily: MONO, marginTop: 4, wordBreak: "break-all", lineHeight: 1.6 }}>
-              {HASH_FULL}
+              {c.hash || HASH_FULL}
             </div>
           </div>
           <Btn variant="accent" icon={verifying ? RefreshCw : Fingerprint} onClick={reverify} disabled={verifying}>
-            {verifying ? "Re-verifying…" : "Re-verify Hash"}
+            {verifying ? "Re-verifying…" : "Re-verify Case Hash"}
           </Btn>
         </div>
       </Card>
@@ -3905,42 +4307,36 @@ function AdminCaseDetail({ c, back }) {
 /* ─────────────────────────────  ADMIN SECURITY & AUDIT  ───────────────────────────── */
 
 function AdminSecurityAudit() {
+  const [logs, setLogs] = useState(() => DataService.getAuditLogs());
+  const [q, setQ] = useState("");
+
+  useEffect(() => {
+    const unsub = DataService.subscribe(() => {
+      setLogs([...DataService.getAuditLogs()]);
+    });
+    return unsub;
+  }, []);
+
+  const filteredLogs = logs.filter((a) => {
+    const term = q.toLowerCase();
+    return !term || `${a.action} ${a.actorId} ${a.role} ${a.details} ${a.officerId || ""} ${a.caseId || ""}`.toLowerCase().includes(term);
+  });
+
   return (
     <div className="space-y-5">
-      <SectionTitle sub="Login activity, case activity and evidence integrity">Security & Audit</SectionTitle>
-
-      <Card>
-        <CardHead title="Recent Activity" icon={Clock} note={`${ADMIN_AUDIT.length} events`} />
-        {ADMIN_AUDIT.map((a, i) => {
-          const sv = NOTIF_SEV[a.sev];
-          return (
-            <div key={a.title + i} className="flex items-start gap-3 px-4 py-3.5"
-              style={{ borderBottom: i < ADMIN_AUDIT.length - 1 ? `1px solid ${C.border2}` : "none" }}>
-              <span className="inline-flex items-center justify-center rounded-md shrink-0 mt-0.5"
-                style={{ width: 32, height: 32, background: sv.bg, color: sv.fg }}>
-                <a.icon size={15} />
-              </span>
-              <div className="flex-1 min-w-0">
-                <div className="flex items-center justify-between gap-2 flex-wrap">
-                  <div style={{ color: C.ink, fontSize: 13, fontWeight: 650 }}>{a.title}</div>
-                  <div style={{ color: C.faint, fontSize: 11 }}>{a.time}</div>
-                </div>
-                <div style={{ color: C.muted, fontSize: 11.5, marginTop: 2 }}>{a.body}</div>
-              </div>
-            </div>
-          );
-        })}
-      </Card>
+      <SectionTitle sub="Cryptographic integrity, authentication events and evidence audit trail">
+        Security & Audit
+      </SectionTitle>
 
       <div className="grid lg:grid-cols-2 gap-5">
         <Card>
           <CardHead title="Hash Verification Status" icon={Fingerprint}
             right={<Pill fg={C.green} bg={C.greenSoft} dot>Clear</Pill>} />
           <div className="p-4 space-y-3">
-            <Banner tone="ok" title="No integrity issues detected"
-              body="All sealed records reviewed by this console match their stored SHA-256 hashes." />
+            <Banner tone="ok" title="Evidence integrity verified"
+              body="All digital records in local storage match their signed SHA-256 hashes." />
             <div className="grid grid-cols-3 gap-4">
-              <Field label="Records checked" value="417" mono />
+              <Field label="Records checked" value={DataService.getCases().length.toString()} mono />
               <Field label="Hash mismatches" value="0" mono />
               <Field label="Signature errors" value="0" mono />
             </div>
@@ -3950,12 +4346,53 @@ function AdminSecurityAudit() {
         <Card>
           <CardHead title="Access Controls" icon={Lock} />
           <div className="p-4 grid gap-y-1">
-            <CheckRow label="Admin sessions require secure login" note="Session tied to console device and ID" />
-            <CheckRow label="Officer identity linked securely to records" note="Referenced by ID, not personal details" />
-            <CheckRow label="Every case action is time-stamped" note="Creation, update and verification events logged" />
+            <CheckRow label="Admin sessions require secure login" note="Console restricted to authenticated admin ID" />
+            <CheckRow label="Officer identity linked to records" note="Every case stores unique Officer ID" />
+            <CheckRow label="Every case action is time-stamped" note="Creation, analysis and sealing events logged" />
           </div>
         </Card>
       </div>
+
+      <Card className="p-3.5">
+        <Input value={q} onChange={setQ} icon={Search} placeholder="Filter audit logs by officer ID, case ID or action..." />
+      </Card>
+
+      <Card>
+        <CardHead title="System Audit Logs" icon={Clock} note={`${filteredLogs.length} events`} />
+        {filteredLogs.length === 0 ? (
+          <EmptyState title="No Audit Logs" body="No events matching the search criteria." />
+        ) : (
+          <div className="divide-y divide-slate-100">
+            {filteredLogs.map((a, i) => (
+              <div key={a.id || i} className="flex items-start gap-3 px-4 py-3.5 hover:bg-slate-50">
+                <span className="inline-flex items-center justify-center rounded-md shrink-0 mt-0.5"
+                  style={{ width: 32, height: 32, background: a.status === "Success" ? C.greenSoft : C.amberSoft, color: a.status === "Success" ? C.green : C.amber }}>
+                  <ShieldCheck size={16} />
+                </span>
+                <div className="flex-1 min-w-0">
+                  <div className="flex items-center justify-between gap-2 flex-wrap">
+                    <div className="flex items-center gap-2">
+                      <span style={{ color: C.ink, fontSize: 13, fontWeight: 650 }}>{a.action}</span>
+                      <Pill fg={a.status === "Success" ? C.green : C.amber} bg={a.status === "Success" ? C.greenSoft : C.amberSoft}>
+                        {a.status}
+                      </Pill>
+                    </div>
+                    <span style={{ color: C.faint, fontSize: 11, fontFamily: MONO }}>{a.timestamp}</span>
+                  </div>
+                  <div className="flex items-center gap-2 mt-1 text-xs text-slate-500 font-mono">
+                    <span>Actor: {a.actorId}</span>
+                    <span>·</span>
+                    <span>Role: {a.role}</span>
+                    {a.officerId && <span>· Officer: {a.officerId}</span>}
+                    {a.caseId && <span>· Case: {a.caseId}</span>}
+                  </div>
+                  <div style={{ color: C.muted, fontSize: 11.5, marginTop: 3 }}>{a.details}</div>
+                </div>
+              </div>
+            ))}
+          </div>
+        )}
+      </Card>
     </div>
   );
 }
@@ -3964,38 +4401,57 @@ function AdminSecurityAudit() {
 
 function AdminReports({ cases, openCase }) {
   const [downloaded, setDownloaded] = useState({});
-  const withOfficer = cases.map((c, i) => ({ ...c, officerId: CASE_OFFICER_IDS[i % CASE_OFFICER_IDS.length] }));
+  const [q, setQ] = useState("");
+
+  const filtered = cases.filter((c) => {
+    const term = q.toLowerCase();
+    return !term || `${c.id} ${c.officerId || ""} ${c.officerName || ""} ${c.area} ${c.substance}`.toLowerCase().includes(term);
+  });
 
   return (
     <div className="space-y-5">
       <SectionTitle sub={`${cases.length} case reports · ${ADMIN.unit}`}>Reports</SectionTitle>
 
+      <Card className="p-3.5">
+        <Input value={q} onChange={setQ} icon={Search} placeholder="Search reports by case ID, officer ID or location..." />
+      </Card>
+
       <Card>
-        <CardHead title="Case Reports" icon={FileText} />
-        {withOfficer.map((c, i) => {
-          const m = RESULT_META[c.result];
-          return (
-            <div key={c.id} className="flex items-center gap-3 px-4 py-3.5 flex-wrap"
-              style={{ borderBottom: i < withOfficer.length - 1 ? `1px solid ${C.border2}` : "none" }}>
-              <span className="inline-flex items-center justify-center rounded-md shrink-0"
-                style={{ width: 34, height: 34, background: m.bg, color: m.fg }}>
-                <m.Icon size={17} />
-              </span>
-              <div className="min-w-0" style={{ flex: "1 1 200px" }}>
-                <div style={{ color: C.ink, fontSize: 13, fontWeight: 650, fontFamily: MONO }}>{c.id}</div>
-                <div style={{ color: C.muted, fontSize: 11.5, marginTop: 2 }}>{c.date} · {c.officerId}</div>
+        <CardHead title="Case Reports" icon={FileText} note={`${filtered.length} available`} />
+        {filtered.length === 0 ? (
+          <EmptyState title="No Reports Found" body="No case reports match your search." />
+        ) : (
+          filtered.map((c, i) => {
+            const m = RESULT_META[c.result] || RESULT_META.match;
+            return (
+              <div key={c.id} className="flex items-center gap-3 px-4 py-3.5 flex-wrap hover:bg-slate-50"
+                style={{ borderBottom: i < filtered.length - 1 ? `1px solid ${C.border2}` : "none" }}>
+                <span className="inline-flex items-center justify-center rounded-md shrink-0"
+                  style={{ width: 34, height: 34, background: m.bg, color: m.fg }}>
+                  <m.Icon size={17} />
+                </span>
+                <div className="min-w-0" style={{ flex: "1 1 200px" }}>
+                  <div className="flex items-center gap-2">
+                    <span style={{ color: C.ink, fontSize: 13, fontWeight: 650, fontFamily: MONO }}>{c.id}</span>
+                    <span className="px-2 py-0.5 rounded text-xs font-mono font-medium bg-slate-100 text-slate-700">
+                      {c.officerId}
+                    </span>
+                    {c.officerName && <span style={{ color: C.ink2, fontSize: 12 }}>{c.officerName}</span>}
+                  </div>
+                  <div style={{ color: C.muted, fontSize: 11.5, marginTop: 2 }}>{c.date} · {c.area} · {c.substance}</div>
+                </div>
+                <Pill fg={m.fg} bg={m.bg}>{m.label}</Pill>
+                <div className="flex gap-2">
+                  <Btn variant="outline" size="sm" icon={Eye} onClick={() => openCase(c)}>View Case</Btn>
+                  <Btn variant="ghost" size="sm" icon={downloaded[c.id] ? Check : Download}
+                    onClick={() => setDownloaded((d) => ({ ...d, [c.id]: true }))}>
+                    {downloaded[c.id] ? "Downloaded" : "Download PDF"}
+                  </Btn>
+                </div>
               </div>
-              <Pill fg={m.fg} bg={m.bg}>{m.label}</Pill>
-              <div className="flex gap-2">
-                <Btn variant="outline" size="sm" icon={Eye} onClick={() => openCase(c)}>View Report</Btn>
-                <Btn variant="ghost" size="sm" icon={downloaded[c.id] ? Check : Download}
-                  onClick={() => setDownloaded((d) => ({ ...d, [c.id]: true }))}>
-                  {downloaded[c.id] ? "Downloaded" : "Download Report"}
-                </Btn>
-              </div>
-            </div>
-          );
-        })}
+            );
+          })
+        )}
       </Card>
     </div>
   );
@@ -4005,23 +4461,46 @@ function AdminReports({ cases, openCase }) {
 
 function App() {
   const [screen, setScreen] = useState("splash");
-  const [cases, setCases] = useState(SEED_CASES);
-  const [selected, setSelected] = useState(SEED_CASES[0]);
-  const [adminSelected, setAdminSelected] = useState(SEED_CASES[0]);
+  const [officer, setOfficer] = useState(() => DataService.getOfficers()[0] || OFFICERS_SEED[0]);
+  const [selectedOfficer, setSelectedOfficer] = useState(() => DataService.getOfficers()[0] || OFFICERS_SEED[0]);
+  const [cases, setCases] = useState(() => DataService.getCases());
+  const [selected, setSelected] = useState(() => DataService.getCases()[0] || SEED_CASES[0]);
+  const [adminSelected, setAdminSelected] = useState(() => DataService.getCases()[0] || SEED_CASES[0]);
   const [net, setNet] = useState("online");
   const [lastSync, setLastSync] = useState("09:43");
   const [outcome, setOutcome] = useState("match");
   const [quality, setQuality] = useState("good");
   const [qrBack, setQrBack] = useState("record");
-  const [draft, setDraft] = useState({
+
+  const getNextCaseId = () => {
+    const allCases = DataService.getCases();
+    const numbers = allCases.map((c) => {
+      const m = c.id && c.id.match(/(\d+)$/);
+      return m ? parseInt(m[1], 10) : 400;
+    });
+    const maxNum = numbers.length ? Math.max(...numbers) : 417;
+    const nextNum = String(maxNum + 1).padStart(5, "0");
+    return `NCB/TN/2026/${nextNum}`;
+  };
+
+  const [draft, setDraft] = useState(() => ({
     id: "NCB/TN/2026/00418",
     ref: "FIR 412/2026 · Park Town PS",
     location: "Park Town Checkpoint, Chennai",
-    officerId: OFFICER.id,
+    officerId: officer.id,
+    officerName: officer.name,
     pouch: "Marquis reagent pouch",
     date: "15 Sep 2026",
     time: "09:42",
-  });
+  }));
+
+  // Reactive subscription to DataService
+  useEffect(() => {
+    const unsub = DataService.subscribe(() => {
+      setCases([...DataService.getCases()]);
+    });
+    return unsub;
+  }, []);
 
   // sync simulation
   useEffect(() => {
@@ -4032,7 +4511,13 @@ function App() {
 
   const go = (s) => {
     if (s === "newcase") {
-      setDraft((d) => ({ ...d, id: "NCB/TN/2026/00418" }));
+      const nextId = getNextCaseId();
+      setDraft((d) => ({
+        ...d,
+        id: nextId,
+        officerId: officer.id,
+        officerName: officer.name,
+      }));
     }
     setScreen(s);
     if (typeof window !== "undefined") window.scrollTo({ top: 0 });
@@ -4043,29 +4528,60 @@ function App() {
   const openQR = (from) => { setQrBack(from || "record"); go("qr"); };
 
   const sealRecord = () => {
-    if (!cases.find((c) => c.id === draft.id)) {
-      const om = OUTCOME_META[outcome];
-      setCases([{
-        id: draft.id, date: draft.date, time: draft.time, loc: OFFICER.unit,
-        area: draft.location, result: outcome, substance: om.substance,
-        dE: om.dE, verified: true, synced: net !== "offline",
-      }, ...cases]);
+    if (!DataService.getCaseById(draft.id)) {
+      const om = OUTCOME_META[outcome] || OUTCOME_META.match;
+      const currentOfficer = DataService.getOfficerById(draft.officerId) || officer;
+      const newCase = {
+        id: draft.id,
+        ref: draft.ref || "FIR Ref Pending",
+        date: draft.date || "Today",
+        time: draft.time || "09:42",
+        loc: currentOfficer.unit || "Chennai Central Range",
+        area: draft.location || "Field Operation",
+        result: outcome,
+        substance: om.substance,
+        dE: om.dE,
+        verified: true,
+        synced: net !== "offline",
+        officerId: currentOfficer.id,
+        officerName: currentOfficer.name,
+        pouch: draft.pouch || "Marquis reagent pouch",
+        hash: "SHA256:7f83b1657ff1fc53b92dc18148a1d65dfc2d4b1fa3d677284addd200126d9069",
+      };
+      DataService.createCase(newCase);
+      DataService.addActivity({
+        officerId: currentOfficer.id,
+        action: "Digital record sealed",
+        caseId: newCase.id,
+        timestamp: "Just now",
+        details: `${newCase.substance} (${om.label}) sealed under FIR ref ${newCase.ref}`,
+      });
+      DataService.addAuditLog({
+        actorId: currentOfficer.id,
+        role: "Officer",
+        action: "Record sealed & hashed",
+        caseId: newCase.id,
+        officerId: currentOfficer.id,
+        status: "Success",
+        details: `Case ${newCase.id} sealed with SHA-256 hash by ${currentOfficer.name}`,
+      });
     }
   };
   useEffect(() => { if (screen === "record") sealRecord(); /* eslint-disable-next-line */ }, [screen]);
 
   if (screen === "splash") return <Splash onDone={() => setScreen("role")} />;
   if (screen === "role") return <RoleSelect onOfficer={() => setScreen("login")} onAdmin={() => setScreen("adminlogin")} />;
-  if (screen === "login") return <Login onLogin={() => setScreen("home")} />;
+  if (screen === "login") return <Login onLogin={(o) => { if (o) { setOfficer(o); setDraft((d) => ({ ...d, officerId: o.id, officerName: o.name })); } setScreen("home"); }} />;
   if (screen === "adminlogin") return <AdminLogin onLogin={() => setScreen("admindash")} onBack={() => setScreen("role")} />;
 
-  const ADMIN_SCREENS = ["admindash", "admincases", "admincasedetail", "adminofficers", "adminsecurity", "adminreports"];
+  const ADMIN_SCREENS = ["admindash", "admincases", "admincasedetail", "adminofficers", "adminofficerdetail", "adminsecurity", "adminreports"];
   if (ADMIN_SCREENS.includes(screen)) {
     const adminBody = {
-      admindash: <AdminDashboard go={go} cases={cases} />,
+      admindash: <AdminDashboard go={go} cases={cases} openCase={adminOpenCase} />,
       admincases: <AdminCaseMonitoring cases={cases} openCase={adminOpenCase} />,
       admincasedetail: <AdminCaseDetail c={adminSelected} back={() => go("admincases")} />,
-      adminofficers: <AdminOfficers />,
+      adminofficers: <AdminOfficers onSelectOfficer={(o) => { setSelectedOfficer(o); go("adminofficerdetail"); }} />,
+      adminofficerdetail: <AdminOfficerDetail officer={selectedOfficer} back={() => go("adminofficers")} openCase={adminOpenCase} />,
       adminsecurity: <AdminSecurityAudit />,
       adminreports: <AdminReports cases={cases} openCase={adminOpenCase} />,
     }[screen];
@@ -4077,10 +4593,10 @@ function App() {
   }
 
   const body = {
-    home: <HomeScreen go={go} cases={cases} net={net} lastSync={lastSync} openCase={openCase} />,
-    cases: <CasesScreen cases={cases} openCase={openCase} go={go} net={net} />,
+    home: <HomeScreen go={go} cases={cases} net={net} lastSync={lastSync} openCase={openCase} officer={officer} />,
+    cases: <CasesScreen cases={cases} openCase={openCase} go={go} net={net} officer={officer} />,
     casedetail: <CaseDetail c={selected} go={go} back={() => go("cases")} openQR={() => openQR("casedetail")} />,
-    newcase: <NewCase go={go} draft={draft} setDraft={setDraft} />,
+    newcase: <NewCase go={go} draft={draft} setDraft={setDraft} officer={officer} />,
     capture: <Capture go={go} draft={draft} outcome={outcome} setOutcome={setOutcome} quality={quality} setQuality={setQuality} />,
     processing: <Processing go={go} />,
     analysis: <AnalysisDetails go={go} outcome={outcome} draft={draft} />,
@@ -4089,12 +4605,13 @@ function App() {
     qr: <QRVerify go={go} draft={draft} back={() => go(qrBack)} />,
     report: <Report go={go} draft={draft} outcome={outcome} />,
     security: <SecurityCenter net={net} setNet={setNet} lastSync={lastSync} />,
-    profile: <Profile onSignOut={() => setScreen("splash")} net={net} lastSync={lastSync} />,
+    profile: <Profile onSignOut={() => setScreen("splash")} net={net} lastSync={lastSync} officer={officer} />,
   }[screen];
 
   return (
-    <Shell screen={screen} go={go} net={net} setNet={setNet} lastSync={lastSync}>
+    <Shell screen={screen} go={go} net={net} setNet={setNet} lastSync={lastSync} officer={officer}>
       {body}
     </Shell>
   );
 }
+
